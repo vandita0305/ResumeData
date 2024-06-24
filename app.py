@@ -1,76 +1,65 @@
 import streamlit as st
 import fitz  # PyMuPDF
 import json
-import openai
-import os
-from dotenv import load_dotenv
+import re
 
-# Load environment variables from .env file
-load_dotenv()
-
-# Set up OpenAI API key
-openai.api_key = os.getenv("OPENAI_API_KEY")
-
-def extract_text_from_first_page(pdf_path):
+# Function to extract text from all pages of the PDF
+def extract_text_from_pdf(pdf_path):
     doc = fitz.open(pdf_path)
-    first_page = doc.load_page(0)  # Load the first page
-    text = first_page.get_text("text")
+    text = ""
+    for page_num in range(len(doc)):
+        page = doc.load_page(page_num)
+        text += page.get_text("text")
     return text
 
-def extract_data_with_openai(text, template):
-    prompt = f"Extract the following information from the resume text and format it as JSON:\n"
-    for key in template.keys():
-        prompt += f"{key}: \n"
-    prompt += f"\nResume Text:\n{text}"
+# Function to extract table data from text
+def extract_table_data(text, start_marker, end_marker, column_headers):
+    start = text.find(start_marker) + len(start_marker)
+    end = text.find(end_marker, start)
+    table_text = text[start:end].strip()
 
-    response = openai.Completion.create(
-        engine="gpt-3.5-turbo-instruct",
-        prompt=prompt,
-        max_tokens=500
-    )
-    extracted_data = response.choices[0].text.strip()
+    lines = table_text.split('\n')
+    data = []
+    for line in lines[1:]:
+        values = line.split()
+        if len(values) == len(column_headers):
+            row = {column_headers[i]: values[i] for i in range(len(column_headers))}
+            data.append(row)
+    return data
+
+# Function to parse the text and extract all fields and tables
+def extract_fields_from_text(text):
+    fields = {}
+
+    patterns = {
+        'passport_no': r'Passport No\.\s*(\w+)',
+        'sbook_no': r'S/book No\.\s*(\w+)',
+        'schengen_visa': r'Schengen visa\s*([^\n]+)',
+        'korean_keta_visa': r'Korean K-ETA Visa\s*([^\n]+)',
+        'position_applied': r'Position Applied:\s*([^\n]+)',
+        'date_available': r'Date Available:\s*([^\n]+)',
+        'name': r'Name\s*:\s*([^\n]+)',
+        'nationality': r'Nationality:\s*([^\n]+)',
+        'date_place_of_birth': r'Date /Place of birth:\s*([^\n]+)',
+        'home_address': r'Currently Home address:\s*([^\n]+)',
+        'phone_email': r'Phone/email\s*([^\n]+)',
+        'nearest_airport': r'Nearest  international airport:\s*([^\n]+)',
+    }
     
-    # Attempt to fix JSON if it's malformed
-    try:
-        return json.loads(extracted_data)
-    except json.JSONDecodeError as e:
-        st.error(f"Error parsing JSON: {e}")
-        st.error("Attempting to fix JSON format...")
-        try:
-            # Fix common JSON issues
-            fixed_data = extracted_data
-            # Ensure proper closing brackets
-            if fixed_data.count('{') > fixed_data.count('}'):
-                fixed_data += '}' * (fixed_data.count('{') - fixed_data.count('}'))
-            if fixed_data.count('[') > fixed_data.count(']'):
-                fixed_data += ']' * (fixed_data.count('[') - fixed_data.count(']'))
+    for field_name, pattern in patterns.items():
+        match = re.search(pattern, text, re.MULTILINE)
+        if match:
+            fields[field_name] = match.group(1).strip()
 
-            return json.loads(fixed_data)
-        except Exception as e:
-            st.error(f"Could not fix JSON: {e}")
-            return {}
+    licence_particulars_headers = ["STCW Code", "Cert No", "Place of Issue", "Date of Issue", "Expiry date"]
+    certificates_headers = ["Cert No", "Date of Issue", "Expiry date"]
+    sea_service_headers = ["Name of Vessel", "Flag", "DWT Type of Vessel", "Rank", "Date of Sign-on", "Date of Sign-off", "Name of Owners"]
 
-def save_to_json(data, output_path):
-    with open(output_path, 'w') as json_file:
-        json.dump(data, json_file, indent=4)
+    fields['licence_particulars'] = extract_table_data(text, "LICENCE PARTICULARS", "CERTIFICATES", licence_particulars_headers)
+    fields['certificates'] = extract_table_data(text, "CERTIFICATES", "SEA SERVICE", certificates_headers)
+    fields['sea_service'] = extract_table_data(text, "SEA SERVICE", "References", sea_service_headers)
 
-# Define the template with common resume fields
-template = {
-    "name": "",
-    "email": "",
-    "phone": "",
-    "address": "",
-    "summary": "",
-    "skills": "",
-    "education": "",
-    "work_experience": "",
-    "certifications": "",
-    "projects": "",
-    "languages": "",  # New field for languages
-    "hobbies": "",    # New field for hobbies
-    "linkedin": "",   # New field for LinkedIn profile
-    "github": ""      # New field for GitHub profile
-}
+    return fields
 
 # Streamlit app
 st.title("Resume PDF to JSON Converter")
@@ -79,34 +68,33 @@ uploaded_file = st.file_uploader("Upload a PDF file", type="pdf")
 
 if uploaded_file is not None:
     # Save uploaded file to disk
-    with open("uploaded_resume.pdf", "wb") as f:
+    pdf_path = "uploaded_resume.pdf"
+    with open(pdf_path, "wb") as f:
         f.write(uploaded_file.getbuffer())
 
     st.success("PDF uploaded successfully!")
 
-    # Extract text from the first page of the PDF
-    extracted_text = extract_text_from_first_page("uploaded_resume.pdf")
+    # Extract text from the PDF
+    extracted_text = extract_text_from_pdf(pdf_path)
 
-    st.text("Extracted Text:")
-    st.write(extracted_text)
+    # Extract fields from the text
+    extracted_fields = extract_fields_from_text(extracted_text)
+    
+    # Save extracted fields to a JSON file
+    json_output_path = "extracted_resume_data.json"
+    with open(json_output_path, 'w') as json_file:
+        json.dump(extracted_fields, json_file, indent=4)
 
-    # Convert extracted text to JSON format using OpenAI
-    try:
-        resume_data = extract_data_with_openai(extracted_text, template)
-        
-        # Ensure all fields from the template are present
-        for key in template.keys():
-            if key not in resume_data:
-                resume_data[key] = ""
+    st.success("Data extracted and saved to JSON!")
 
-        # Save JSON data to file
-        json_output_path = "resume_data.json"
-        save_to_json(resume_data, json_output_path)
-
-        st.success("Data extracted and saved to JSON!")
-
-        # Display JSON file content
-        with open(json_output_path, 'r') as json_file:
-            st.json(json.load(json_file))
-    except Exception as e:
-        st.error(f"An error occurred: {e}")
+    # Display JSON file content
+    st.json(extracted_fields)
+    
+    # Provide a download link for the JSON file
+    with open(json_output_path, "rb") as file:
+        btn = st.download_button(
+            label="Download JSON",
+            data=file,
+            file_name="extracted_resume_data.json",
+            mime="application/json"
+        )
